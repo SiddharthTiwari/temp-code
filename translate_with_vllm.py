@@ -1,51 +1,52 @@
-import requests
-import json
+from vllm import LLM, SamplingParams
+import time
 
-def translate_arabic_to_english(arabic_text, url="http://localhost:8000/v1/completions"):
+def translate_arabic_to_english(arabic_text, model_name="meta-llama/Llama-2-7b-chat-hf"):
     """
-    Sends a POST request to vLLM model to translate Arabic text to English
+    Translates Arabic text to English using vLLM's Python API
     
     Args:
         arabic_text (str): Arabic text to translate
-        url (str): URL of the vLLM API endpoint
-    
+        model_name (str): Name of the model to use
+        
     Returns:
         str: English translation
     """
-    
-    # Prepare the prompt with clear instructions
-    prompt = f"""Translate the following Arabic text to English:
+    try:
+        # Initialize the LLM
+        # Note: This will load the model, which may take time on first execution
+        llm = LLM(model=model_name)
+        
+        # Prepare the prompt with clear instructions
+        prompt = f"""Translate the following Arabic text to English:
 
 Arabic: {arabic_text}
 
 English translation:"""
-    
-    payload = {
-        "model": "your_model_name",  # Replace with your actual model name if needed
-        "prompt": prompt,
-        "max_tokens": 1000,
-        "temperature": 0.1,  # Lower temperature for more deterministic translations
-        "stream": False
-    }
-    
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        response.raise_for_status()
         
-        result = response.json()
+        # Set sampling parameters
+        sampling_params = SamplingParams(
+            temperature=0.1,        # Lower temperature for more deterministic translations
+            max_tokens=1000,        # Maximum length of generated text
+            top_p=0.95,             # Nucleus sampling
+            stop_token_ids=None,    # No special stop tokens
+            stop=["Arabic:", "\n\n"] # Stop generation at these strings
+        )
         
-        # Extract the translated text from the response
-        # This may need adjustment based on your actual response format
-        translation = result["choices"][0]["text"].strip()
+        # Generate the translation
+        start_time = time.time()
+        outputs = llm.generate([prompt], sampling_params)
+        end_time = time.time()
         
-        return translation
+        # Extract the generated text
+        generated_text = outputs[0].outputs[0].text.strip()
+        
+        print(f"Translation completed in {end_time - start_time:.2f} seconds")
+        
+        return generated_text
     
-    except requests.exceptions.RequestException as e:
-        print(f"Error making request: {e}")
+    except Exception as e:
+        print(f"Error generating translation: {e}")
         return None
 
 # Example usage
