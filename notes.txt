@@ -1,1 +1,10 @@
 .cache/huggingface/hub/models--speechbrain--spkrec-ecapa-voxceleb/snapshots/eac27266f68caa806381260bd44ace38b136c76a$ 
+
+
+# Make sure you have git-lfs installed (https://git-lfs.com)
+git lfs install
+
+git clone https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb
+
+# If you want to clone without large files - just their pointers
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb
