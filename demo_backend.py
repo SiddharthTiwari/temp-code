@@ -13,6 +13,7 @@ import pandas as pd
 import argparse
 from tqdm import tqdm
 import logging
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +31,6 @@ class LocalSpeechBrainPretrainedSpeakerEmbedding(SpeechBrainPretrainedSpeakerEmb
         Derived class that allows specifying a local directory (savedir) from which
         to load the SpeechBrain model.
         """
-        # Parse revision if provided in the embedding string.
         if "@" in embedding:
             self.embedding = embedding.split("@")[0]
             self.revision = embedding.split("@")[1]
@@ -45,14 +45,13 @@ class LocalSpeechBrainPretrainedSpeakerEmbedding(SpeechBrainPretrainedSpeakerEmb
         from speechbrain.inference import EncoderClassifier as SpeechBrain_EncoderClassifier
         self.classifier_ = SpeechBrain_EncoderClassifier.from_hparams(
             source=self.embedding,
-            savedir=self.savedir,  # use the custom local directory
+            savedir=self.savedir,
             run_opts={"device": self.device},
             use_auth_token=self.use_auth_token,
             revision=self.revision,
         )
 
     def to(self, device: torch.device):
-        # Update device if needed
         self.device = device
         from speechbrain.inference import EncoderClassifier as SpeechBrain_EncoderClassifier
         self.classifier_ = SpeechBrain_EncoderClassifier.from_hparams(
@@ -64,13 +63,15 @@ class LocalSpeechBrainPretrainedSpeakerEmbedding(SpeechBrainPretrainedSpeakerEmb
         )
         return self
 
-def load_whisper_model(model_size: str, language: str):
+def load_whisper_model(model_size: str, audio_lang: str):
     """
-    Load the Whisper ASR model based on model size and language.
+    Load the Whisper ASR model based on model size and audio language.
+    
+    For English audio (if not large), load the language‑specific variant.
     """
     model_name = model_size
-    if language == 'English' and model_size != 'large':
-        model_name += '.en'
+    if audio_lang.lower() == "english" and model_size != "large":
+        model_name += ".en"
     logging.info(f"Loading Whisper model: {model_name}")
     return whisper.load_model(model_size)
 
@@ -84,7 +85,7 @@ def load_embedding_model():
     return LocalSpeechBrainPretrainedSpeakerEmbedding(
         embedding="spkrec-ecapa-voxceleb",
         device=device,
-        savedir="spkrec-ecapa-voxceleb"
+        savedir="spkrec-ecapa-voxceleb"  # Update this path if necessary
     )
 
 def load_audio_object():
@@ -101,10 +102,8 @@ def segment_embedding(segment, duration, audio_path, embedding_model, audio_obj)
     end = min(duration, segment["end"])  # Adjust for potential overshoot
     clip = Segment(start, end)
     waveform, sample_rate = audio_obj.crop(audio_path, clip)
-    # Convert stereo to mono if needed
     if waveform.shape[0] > 1:
         waveform = waveform.mean(axis=0, keepdims=True)
-    # Add a batch dimension: shape becomes (1, channels, samples)
     embedding = embedding_model(waveform[None])
     return embedding
 
@@ -119,17 +118,61 @@ def run_diarization(
     whisper_model,
     embedding_model,
     audio_obj,
-    num_speakers: int
+    num_speakers: int,
+    seed: int,
+    audio_lang: str
 ):
     """
     Process the audio file: transcribe, generate embeddings, perform clustering,
     and return the segmented transcript with speaker labels.
+    
+    Decoding options are adjusted based on whether the audio is Arabic or English.
     """
     logging.info(f"Transcribing audio file: {file_path}")
-    result = whisper_model.transcribe(file_path, language='en')
+
+    # Set seeds for reproducibility.
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    # Set decoding options based on audio language.
+    if audio_lang.lower() == "arabic":
+        decoding_options = {
+            "task": "translate",                    # Translate Arabic speech to English text.
+            "language": "ar",                       # Source language is Arabic.
+            "beam_size": 5,
+            "best_of": 5,
+            "temperature": 0.0,
+            "patience": 1.0,
+            "length_penalty": 1.0,
+            "suppress_tokens": [],
+            "initial_prompt": "Call center conversation regarding customer support.",
+            "condition_on_previous_text": True,
+            "logprob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+            "compression_ratio_threshold": 2.4,
+        }
+    else:  # For English audio.
+        decoding_options = {
+            "task": "transcribe",                   # Transcribe English speech.
+            "language": "en",                       # Source language is English.
+            "beam_size": 5,
+            "best_of": 5,
+            "temperature": 0.0,
+            "patience": 1.0,
+            "length_penalty": 1.0,
+            "suppress_tokens": [],
+            "initial_prompt": "Call center conversation regarding customer support.",
+            "condition_on_previous_text": True,
+            "logprob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
+            "compression_ratio_threshold": 2.4,
+        }
+    
+    result = whisper_model.transcribe(file_path, **decoding_options)
     segments = result["segments"]
 
-    # Determine audio duration using wave
+    # Determine audio duration using wave.
     with contextlib.closing(wave.open(file_path, 'r')) as f:
         frames = f.getnframes()
         rate = f.getframerate()
@@ -139,7 +182,6 @@ def run_diarization(
     embeddings = np.zeros(shape=(len(segments), 192))
     for i, segment in enumerate(segments):
         embeddings[i] = segment_embedding(segment, duration, file_path, embedding_model, audio_obj)
-
     embeddings = np.nan_to_num(embeddings)
 
     logging.info(f"Performing speaker clustering with {num_speakers} speakers")
@@ -162,13 +204,12 @@ def run_diarization(
     transcript = "\n".join(transcript_lines)
     return transcript
 
-def process_files_from_csv(csv_path, output_dir, model_size, language, num_speakers):
+def process_files_from_csv(csv_path, output_dir, model_size, audio_lang, num_speakers, seed):
     """
     Process all files listed in the CSV.
     CSV should have columns: 'filename' and 'file_path'
     """
-    # Load models once to reuse for all files
-    whisper_model = load_whisper_model(model_size, language)
+    whisper_model = load_whisper_model(model_size, audio_lang)
     embedding_model = load_embedding_model()
     audio_obj = load_audio_object()
     
@@ -178,7 +219,6 @@ def process_files_from_csv(csv_path, output_dir, model_size, language, num_speak
             logging.error("CSV must contain 'filename' and 'file_path' columns")
             return
         
-        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing files"):
@@ -190,7 +230,6 @@ def process_files_from_csv(csv_path, output_dir, model_size, language, num_speak
                 continue
                 
             try:
-                # Generate output filename (same as input but with .txt extension)
                 base_name = os.path.splitext(filename)[0]
                 output_file = os.path.join(output_dir, f"{base_name}.txt")
                 
@@ -200,32 +239,31 @@ def process_files_from_csv(csv_path, output_dir, model_size, language, num_speak
                     whisper_model,
                     embedding_model,
                     audio_obj,
-                    num_speakers
+                    num_speakers,
+                    seed,
+                    audio_lang
                 )
                 
-                # Save transcript
                 with open(output_file, 'w', encoding='utf-8') as f:
                     f.write(transcript)
-                
                 logging.info(f"Saved transcript to {output_file}")
-                
             except Exception as e:
                 logging.error(f"Error processing {filename}: {str(e)}")
-    
     except Exception as e:
         logging.error(f"Error reading CSV file: {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch audio transcription with speaker diarization")
-    parser.add_argument("--csv", type=str,default="audio_files.csv", help="Path to CSV file with filename and file_path columns")
+    parser.add_argument("--csv", type=str, default="audio_files.csv", help="Path to CSV file with filename and file_path columns")
     parser.add_argument("--output", type=str, default="transcripts", help="Directory to save transcripts")
-    parser.add_argument("--model", type=str, default="small", choices=["tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3"], 
+    parser.add_argument("--model", type=str, default="large-v3", choices=["tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3"],
                         help="Whisper model size")
-    parser.add_argument("--language", type=str, default="English", choices=["any", "English"], help="Language setting")
+    parser.add_argument("--audio_lang", type=str, default="english", choices=["arabic", "english"], help="Language of the input audio")
     parser.add_argument("--speakers", type=int, default=2, help="Number of speakers to detect")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     
     args = parser.parse_args()
     
-    logging.info(f"Starting batch processing with model={args.model}, speakers={args.speakers}")
-    process_files_from_csv(args.csv, args.output, args.model, args.language, args.speakers)
+    logging.info(f"Starting batch processing with model={args.model}, speakers={args.speakers}, seed={args.seed}")
+    process_files_from_csv(args.csv, args.output, args.model, args.audio_lang, args.speakers, args.seed)
     logging.info("Batch processing complete")
