@@ -4,7 +4,7 @@ import wave
 import contextlib
 import numpy as np
 import torch
-from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding, SpeechBrainPretrainedSpeakerEmbedding
 from pyannote.audio import Audio
 from pyannote.core import Segment
 from sklearn.cluster import AgglomerativeClustering
@@ -24,6 +24,46 @@ logging.basicConfig(
     ]
 )
 
+class LocalSpeechBrainPretrainedSpeakerEmbedding(SpeechBrainPretrainedSpeakerEmbedding):
+    def __init__(self, embedding="speechbrain/spkrec-ecapa-voxceleb", device=None, use_auth_token=None, savedir="/my/local/huggingface_repo/spkrec-ecapa-voxceleb"):
+        """
+        Derived class that allows specifying a local directory (savedir) from which
+        to load the SpeechBrain model.
+        """
+        # Parse revision if provided in the embedding string.
+        if "@" in embedding:
+            self.embedding = embedding.split("@")[0]
+            self.revision = embedding.split("@")[1]
+        else:
+            self.embedding = embedding
+            self.revision = None
+
+        self.device = device or torch.device("cpu")
+        self.use_auth_token = use_auth_token
+        self.savedir = savedir
+
+        from speechbrain.inference import EncoderClassifier as SpeechBrain_EncoderClassifier
+        self.classifier_ = SpeechBrain_EncoderClassifier.from_hparams(
+            source=self.embedding,
+            savedir=self.savedir,  # use the custom local directory
+            run_opts={"device": self.device},
+            use_auth_token=self.use_auth_token,
+            revision=self.revision,
+        )
+
+    def to(self, device: torch.device):
+        # Update device if needed
+        self.device = device
+        from speechbrain.inference import EncoderClassifier as SpeechBrain_EncoderClassifier
+        self.classifier_ = SpeechBrain_EncoderClassifier.from_hparams(
+            source=self.embedding,
+            savedir=self.savedir,
+            run_opts={"device": device},
+            use_auth_token=self.use_auth_token,
+            revision=self.revision,
+        )
+        return self
+
 def load_whisper_model(model_size: str, language: str):
     """
     Load the Whisper ASR model based on model size and language.
@@ -36,11 +76,16 @@ def load_whisper_model(model_size: str, language: str):
 
 def load_embedding_model():
     """
-    Load the pretrained speaker embedding model from SpeechBrain via pyannote.audio.
+    Load the pretrained speaker embedding model from SpeechBrain via pyannote.audio,
+    using the local saved directory.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Loading speaker embedding model on {device}")
-    return PretrainedSpeakerEmbedding("speechbrain/spkrec-ecapa-voxceleb", device=device)
+    return LocalSpeechBrainPretrainedSpeakerEmbedding(
+        embedding="spkrec-ecapa-voxceleb",
+        device=device,
+        savedir="spkrec-ecapa-voxceleb"
+    )
 
 def load_audio_object():
     """
@@ -172,7 +217,7 @@ def process_files_from_csv(csv_path, output_dir, model_size, language, num_speak
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch audio transcription with speaker diarization")
-    parser.add_argument("--csv", type=str, required=True, help="Path to CSV file with filename and file_path columns")
+    parser.add_argument("--csv", type=str,default="audio_files.csv", help="Path to CSV file with filename and file_path columns")
     parser.add_argument("--output", type=str, default="transcripts", help="Directory to save transcripts")
     parser.add_argument("--model", type=str, default="small", choices=["tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3"], 
                         help="Whisper model size")
